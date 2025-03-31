@@ -10,6 +10,9 @@ from database import get_database_session, engine
 from models import Base, User, AudioFile
 from auth import get_authenticated_user, create_jwt_token
 from oauth import yandex_oauth_service, retrieve_yandex_user_info
+from services.user_service import UserService
+from services.audio_service import AudioService
+from services.auth_service import AuthService
 
 app = FastAPI(
     title="Audio Repository Platform",
@@ -40,6 +43,8 @@ async def handle_yandex_callback(
     user_info = Depends(retrieve_yandex_user_info),
     db: AsyncSession = Depends(get_database_session)
 ):
+    auth_service = AuthService(db)
+    user_service = UserService(db)
     try:
         query_result = await db.execute(
             select(User).where(User.yandex_id == str(user_info.id))
@@ -47,17 +52,13 @@ async def handle_yandex_callback(
         user = query_result.scalar_one_or_none()
         
         if not user:
-            user = User(
+            user = await user_service.create_user(
                 yandex_id=str(user_info.id),
                 email=user_info.email,
-                username=user_info.display_name or "",
-                is_superuser=True
+                username=user_info.display_name or ""
             )
-            db.add(user)
-            await db.commit()
-            await db.refresh(user)
         
-        token = create_jwt_token(
+        token = auth_service.create_jwt_token(
             data={"sub": str(user.id)},
             expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         )
@@ -85,20 +86,11 @@ async def get_user_details(
     auth_user: User = Depends(get_authenticated_user),
     db: AsyncSession = Depends(get_database_session)
 ):
+    user_service = UserService(db)
     if not auth_user.is_superuser:
-        raise HTTPException(
-            status_code=403,
-            detail="Insufficient permissions"
-        )
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     
-    query_result = await db.execute(select(User).where(User.id == user_id))
-    user = query_result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(
-            status_code=404,
-            detail="User not found"
-        )
-    
+    user = await user_service.get_user_by_id(user_id)
     return {
         "id": user.id,
         "email": user.email,
@@ -113,15 +105,14 @@ async def modify_user_info(
     auth_user: User = Depends(get_authenticated_user),
     db: AsyncSession = Depends(get_database_session)
 ):
-    auth_user.username = new_username
-    await db.commit()
-    await db.refresh(auth_user)
+    user_service = UserService(db)
+    updated_user = await user_service.update_user(auth_user, new_username)
     return {
-        "id": auth_user.id,
-        "email": auth_user.email,
-        "username": auth_user.username,
-        "is_active": auth_user.is_active,
-        "is_superuser": auth_user.is_superuser
+        "id": updated_user.id,
+        "email": updated_user.email,
+        "username": updated_user.username,
+        "is_active": updated_user.is_active,
+        "is_superuser": updated_user.is_superuser
     }
 
 @app.delete("/users/{user_id}")
@@ -130,23 +121,12 @@ async def remove_user(
     auth_user: User = Depends(get_authenticated_user),
     db: AsyncSession = Depends(get_database_session)
 ):
+    user_service = UserService(db)
     if not auth_user.is_superuser:
-        raise HTTPException(
-            status_code=403,
-            detail="Insufficient permissions"
-        )
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     
-    query_result = await db.execute(select(User).where(User.id == user_id))
-    user = query_result.scalar_one_or_none()
-    
-    if not user:
-        raise HTTPException(
-            status_code=404,
-            detail="User not found"
-        )
-    
-    await db.delete(user)
-    await db.commit()
+    user = await user_service.get_user_by_id(user_id)
+    await user_service.delete_user(user)
     return {"message": "User successfully removed"}
 
 @app.post("/audio/upload", response_model=dict)
@@ -156,37 +136,8 @@ async def upload_audio_file(
     auth_user: User = Depends(get_authenticated_user),
     db: AsyncSession = Depends(get_database_session)
 ):
-    if not file.filename.lower().endswith(('.mp3', '.wav', '.ogg')):
-        raise HTTPException(
-            status_code=400,
-            detail="Only .mp3, .wav, and .ogg files are supported"
-        )
-    
-    if not custom_filename:
-        custom_filename = file.filename
-    
-    file_extension = os.path.splitext(file.filename)[1]
-    unique_filename = f"{custom_filename}{file_extension}"
-    file_path = os.path.join(settings.AUDIO_FILES_DIR, unique_filename)
-    
-    try:
-        with open(file_path, "wb") as buffer:
-            buffer.write(await file.read())
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"File saving failed: {str(e)}"
-        )
-    
-    audio_record = AudioFile(
-        filename=custom_filename,
-        file_path=file_path,
-        owner_id=auth_user.id
-    )
-    db.add(audio_record)
-    await db.commit()
-    await db.refresh(audio_record)
-    
+    audio_service = AudioService(db)
+    audio_record = await audio_service.upload_audio_file(file, custom_filename, auth_user.id)
     return {
         "id": audio_record.id,
         "filename": audio_record.filename,
@@ -200,11 +151,8 @@ async def list_audio_files(
     auth_user: User = Depends(get_authenticated_user),
     db: AsyncSession = Depends(get_database_session)
 ):
-    query_result = await db.execute(
-        select(AudioFile).where(AudioFile.owner_id == auth_user.id)
-    )
-    audio_files = query_result.scalars().all()
-    
+    audio_service = AudioService(db)
+    audio_files = await audio_service.list_audio_files(auth_user.id)
     return [
         {
             "id": file.id,
@@ -217,10 +165,11 @@ async def list_audio_files(
 
 @app.post("/token/refresh")
 async def refresh_jwt_token(
-    auth_user: User = Depends(get_authenticated_user)
+    auth_user: User = Depends(AuthService(get_database_session).get_authenticated_user)
 ):
+    auth_service = AuthService(get_database_session)
     try:
-        token = create_jwt_token(
+        token = auth_service.create_jwt_token(
             data={"sub": str(auth_user.id)},
             expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         )
