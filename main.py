@@ -214,3 +214,23 @@ async def list_audio_files(
         }
         for file in audio_files
     ]
+
+@app.post("/token/refresh")
+async def refresh_jwt_token(
+    auth_user: User = Depends(get_authenticated_user)
+):
+    try:
+        token = create_jwt_token(
+            data={"sub": str(auth_user.id)},
+            expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        )
+        return {"access_token": token, "token_type": "bearer"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000) 
