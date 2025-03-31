@@ -68,3 +68,83 @@ async def handle_yandex_callback(
             status_code=400,
             detail=str(e)
         )
+
+@app.get("/users/me", response_model=dict)
+async def get_current_user_info(auth_user: User = Depends(get_authenticated_user)):
+    return {
+        "id": auth_user.id,
+        "email": auth_user.email,
+        "username": auth_user.username,
+        "is_active": auth_user.is_active,
+        "is_superuser": auth_user.is_superuser
+    }
+
+@app.get("/users/{user_id}", response_model=dict)
+async def get_user_details(
+    user_id: int,
+    auth_user: User = Depends(get_authenticated_user),
+    db: AsyncSession = Depends(get_database_session)
+):
+    if not auth_user.is_superuser:
+        raise HTTPException(
+            status_code=403,
+            detail="Insufficient permissions"
+        )
+    
+    query_result = await db.execute(select(User).where(User.id == user_id))
+    user = query_result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found"
+        )
+    
+    return {
+        "id": user.id,
+        "email": user.email,
+        "username": user.username,
+        "is_active": user.is_active,
+        "is_superuser": user.is_superuser
+    }
+
+@app.patch("/users/me", response_model=dict)
+async def modify_user_info(
+    new_username: str,
+    auth_user: User = Depends(get_authenticated_user),
+    db: AsyncSession = Depends(get_database_session)
+):
+    auth_user.username = new_username
+    await db.commit()
+    await db.refresh(auth_user)
+    return {
+        "id": auth_user.id,
+        "email": auth_user.email,
+        "username": auth_user.username,
+        "is_active": auth_user.is_active,
+        "is_superuser": auth_user.is_superuser
+    }
+
+@app.delete("/users/{user_id}")
+async def remove_user(
+    user_id: int,
+    auth_user: User = Depends(get_authenticated_user),
+    db: AsyncSession = Depends(get_database_session)
+):
+    if not auth_user.is_superuser:
+        raise HTTPException(
+            status_code=403,
+            detail="Insufficient permissions"
+        )
+    
+    query_result = await db.execute(select(User).where(User.id == user_id))
+    user = query_result.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found"
+        )
+    
+    await db.delete(user)
+    await db.commit()
+    return {"message": "User successfully removed"}
