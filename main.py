@@ -6,6 +6,7 @@ from datetime import timedelta
 from starlette.responses import RedirectResponse
 
 from database import get_database_session, engine
+from models import Base, User, AudioFile
 app = FastAPI(
     title="Audio Repository Platform",
     openapi_url="/openapi.json",
