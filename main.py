@@ -148,3 +148,69 @@ async def remove_user(
     await db.delete(user)
     await db.commit()
     return {"message": "User successfully removed"}
+
+@app.post("/audio/upload", response_model=dict)
+async def upload_audio_file(
+    file: UploadFile,
+    custom_filename: str = None,
+    auth_user: User = Depends(get_authenticated_user),
+    db: AsyncSession = Depends(get_database_session)
+):
+    if not file.filename.lower().endswith(('.mp3', '.wav', '.ogg')):
+        raise HTTPException(
+            status_code=400,
+            detail="Only .mp3, .wav, and .ogg files are supported"
+        )
+    
+    if not custom_filename:
+        custom_filename = file.filename
+    
+    file_extension = os.path.splitext(file.filename)[1]
+    unique_filename = f"{custom_filename}{file_extension}"
+    file_path = os.path.join(settings.AUDIO_FILES_DIR, unique_filename)
+    
+    try:
+        with open(file_path, "wb") as buffer:
+            buffer.write(await file.read())
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"File saving failed: {str(e)}"
+        )
+    
+    audio_record = AudioFile(
+        filename=custom_filename,
+        file_path=file_path,
+        owner_id=auth_user.id
+    )
+    db.add(audio_record)
+    await db.commit()
+    await db.refresh(audio_record)
+    
+    return {
+        "id": audio_record.id,
+        "filename": audio_record.filename,
+        "file_path": audio_record.file_path,
+        "created_at": audio_record.created_at,
+        "owner_id": audio_record.owner_id
+    }
+
+@app.get("/audio/files", response_model=list[dict])
+async def list_audio_files(
+    auth_user: User = Depends(get_authenticated_user),
+    db: AsyncSession = Depends(get_database_session)
+):
+    query_result = await db.execute(
+        select(AudioFile).where(AudioFile.owner_id == auth_user.id)
+    )
+    audio_files = query_result.scalars().all()
+    
+    return [
+        {
+            "id": file.id,
+            "filename": file.filename,
+            "file_path": file.file_path,
+            "created_at": file.created_at
+        }
+        for file in audio_files
+    ]
